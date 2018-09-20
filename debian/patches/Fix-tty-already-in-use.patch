@@ -1,0 +1,147 @@
+Description: Fix tty is already logined.
+ TODO: Put a short summary on the line above and replace this paragraph
+ with a longer explanation of this change. Complete the meta-information
+ with other relevant fields (see below for details). To make it easier, the
+ information below has been extracted from the changelog. Adjust it or drop
+ it.
+ .
+ lightdm (1.21.5-2deepin) unstable; urgency=medium
+ .
+   * remove lightdm.pam kwallet5
+Author: sbw <sbw@sbw.so>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: 2018-04-24
+
+--- lightdm-1.21.5.orig/src/vt.c
++++ lightdm-1.21.5/src/vt.c
+@@ -12,6 +12,7 @@
+ #include <string.h>
+ #include <errno.h>
+ #include <unistd.h>
++#include <stdlib.h>
+ #include <glib/gstdio.h>
+ #include <sys/stat.h>
+ #include <fcntl.h>
+@@ -25,6 +26,8 @@
+ 
+ static GList *used_vts = NULL;
+ 
++GList * vt_get_logined(void);
++
+ static gint
+ open_tty (void)
+ {
+@@ -104,7 +107,7 @@ vt_set_active (gint number)
+         /* This call sometimes get interrupted (not sure what signal is causing it), so retry if that is the case */
+         while (TRUE)
+         {
+-            if (ioctl (tty_fd, VT_WAITACTIVE, n) < 0) 
++            if (ioctl (tty_fd, VT_WAITACTIVE, n) < 0)
+             {
+                 if (errno == EINTR)
+                     continue;
+@@ -118,7 +121,7 @@ vt_set_active (gint number)
+ #endif
+ }
+ 
+-static gboolean
++gboolean
+ vt_is_used (gint number)
+ {
+     GList *link;
+@@ -130,7 +133,72 @@ vt_is_used (gint number)
+             return TRUE;
+     }
+ 
+-    return FALSE;
++    gboolean found = FALSE;
++
++    GList *logined_list = vt_get_logined();
++    for (GList *l = logined_list; l != NULL; l = l->next)
++    {
++        if (GPOINTER_TO_INT(l->data) == number)
++        {
++            found = TRUE;
++            break;
++        }
++    }
++
++    g_list_free(logined_list);
++
++    return found;
++}
++
++GList *
++vt_get_logined(void)
++{
++    GList *l = NULL;
++    GDir *dir = g_dir_open("/run/systemd/sessions", 0, NULL);
++    if (!dir)
++        return l;
++
++    const gchar *name = NULL;
++    while ((name = g_dir_read_name(dir)) != NULL)
++    {
++        gchar *file = g_strconcat("/run/systemd/sessions/", name, NULL);
++        g_debug("vt_get_logined %s", file);
++        GError *error = NULL;
++        GMappedFile *f = g_mapped_file_new(file, FALSE, &error);
++        g_free(file);
++
++        if (error) {
++            g_debug("map failed!, %s", error->message);
++            continue;
++        }
++
++        const gchar *content = g_mapped_file_get_contents(f);
++        if (content)
++        {
++            const gchar * vtnr = strstr(content, "VTNR=");
++            if (!vtnr)
++                continue;
++
++            vtnr += 5;
++            const gchar *start_pos = vtnr;
++
++            int n = 0;
++            while (*vtnr++ != '\n')
++                ++n;
++
++            gchar *vt_number = g_strndup(start_pos, n);
++            int number = atoi(vt_number);
++            if (number)
++                l = g_list_append(l, GINT_TO_POINTER(number));
++
++            g_free(vt_number);
++        }
++
++        g_mapped_file_unref(f);
++    }
++
++    g_dir_close(dir);
++    return l;
+ }
+ 
+ gint
+--- lightdm-1.21.5.orig/src/vt.h
++++ lightdm-1.21.5/src/vt.h
+@@ -16,6 +16,8 @@
+ 
+ gboolean vt_can_multi_seat (void);
+ 
++gboolean vt_is_used(gint number);
++
+ gint vt_get_active (void);
+ 
+ gint vt_get_unused (void);

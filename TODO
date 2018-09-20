@@ -1,0 +1,2 @@
+LIGHTDM_SIGNAL_USER_CHANGED -> LIGHTDM_USER_SIGNAL_CHANGED
+Signal docstrings not showing

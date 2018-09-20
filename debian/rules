@@ -1,0 +1,37 @@
+#!/usr/bin/make -f
+
+include /usr/share/dpkg/pkg-info.mk
+include /usr/share/dpkg/architecture.mk
+
+override_dh_auto_configure:
+	sed 's/@LIBSPATH@/$(DEB_HOST_MULTIARCH)/g' debian/50-greeter-wrapper.conf.in > debian/50-greeter-wrapper.conf
+	sed 's/@LIBSPATH@/$(DEB_HOST_MULTIARCH)/g' debian/50-guest-wrapper.conf.in > debian/50-guest-wrapper.conf
+	dh_auto_configure -- --with-greeter-user=lightdm --with-user-session=deepin --with-greeter-session=lightdm-greeter --enable-introspection=yes --disable-silent-rules --libexecdir=/usr/lib/$(DEB_HOST_MULTIARCH)/$(DEB_SOURCE)/
+
+override_dh_installchangelogs:
+	dh_installchangelogs -- NEWS
+
+override_dh_installinit:
+	dh_installinit --noscripts
+
+override_dh_install:
+	find debian/tmp -name '*.la' -delete
+	find debian/tmp/etc/apparmor.d -type f -exec chmod 0644 '{}' \;
+	dh_install --fail-missing -X etc/init/lightdm.conf -X etc/apparmor.d/lightdm-guest-session
+	install -D debian/guest-account.sh debian/lightdm/usr/sbin/guest-account
+	-mv debian/lightdm/usr/lib/lightdm/lightdm-greeter-session debian/lightdm/usr/lib/${DEB_HOST_MULTIARCH}/lightdm/
+	chmod +x debian/lightdm/usr/lib/${DEB_HOST_MULTIARCH}/lightdm/lightdm-greeter-session
+	chmod +x debian/lightdm/usr/lib/lightdm/guest-session-auto.sh
+
+%:
+	dh $@ --with systemd
+
+override_dh_auto_test:
+
+override_dh_systemd_start:
+	dh_systemd_start -plightdm --no-start -r lightdm.service
+
+override_dh_installpam:
+	dh_installpam
+	dh_installpam --name=lightdm-autologin
+	dh_installpam --name=lightdm-greeter

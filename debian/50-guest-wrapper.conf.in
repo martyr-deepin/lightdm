@@ -1,0 +1,2 @@
+[Seat:*]
+guest-wrapper=/usr/lib/@LIBSPATH@/lightdm/lightdm-guest-session
