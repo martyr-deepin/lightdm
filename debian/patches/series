@@ -1,5 +1,5 @@
 #01_set-default-path.patch
-02_fix-apparmor-profile.patch
-05_debianize-pam-files.patch
-06_change-user-dirs.patch
-Fix-tty-already-in-use.patch
+#02_fix-apparmor-profile.patch
+#05_debianize-pam-files.patch
+#06_change-user-dirs.patch
+#Fix-tty-already-in-use.patch
