@@ -4,7 +4,7 @@ Documentation=man:lightdm(1)
 After=systemd-user-sessions.service
 
 # replaces plymouth-quit since lightdm quits plymouth on its own
-Conflicts=plymouth-quit.service
+#Conflicts=plymouth-quit.service
 After=plymouth-quit.service
 
 # lightdm takes responsibility for stopping plymouth, so if it fails
