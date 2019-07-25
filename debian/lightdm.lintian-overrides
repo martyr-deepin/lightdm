@@ -1,0 +1,7 @@
+# we do use -fstack-protector and FORTIFY
+lightdm: hardening-no-stackprotector usr/bin/dm-tool
+lightdm: hardening-no-stackprotector usr/lib/x86_64-linux-gnu/lightdm/lightdm-guest-session-wrapper
+lightdm: hardening-no-stackprotector usr/lib/x86_64-linux-gnu/lightdm/lightdm-set-defaults
+# we need the path since we check file existence
+lightdm: command-with-path-in-maintainer-script postrm:22 /usr/sbin/deluser
+lightdm: command-with-path-in-maintainer-script postrm:27 /usr/sbin/delgroup

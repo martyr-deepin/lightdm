@@ -1,0 +1,22 @@
+From: Yves-Alexis Perez <corsac@debian.org>
+Date: Fri, 22 Feb 2019 17:13:29 +0100
+Subject: liblightdm-qt3: explicitly add symbol visibility
+
+Fix build when symbols are marked hidden by default
+---
+ liblightdm-qt/QLightDM/power.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/liblightdm-qt/QLightDM/power.h b/liblightdm-qt/QLightDM/power.h
+index 44d9e2c..cb1e14f 100644
+--- a/liblightdm-qt/QLightDM/power.h
++++ b/liblightdm-qt/QLightDM/power.h
+@@ -16,7 +16,7 @@
+ 
+ namespace QLightDM
+ {
+-    class PowerInterface : public QObject
++    class Q_DECL_EXPORT PowerInterface : public QObject
+     {
+         Q_OBJECT
+     public:

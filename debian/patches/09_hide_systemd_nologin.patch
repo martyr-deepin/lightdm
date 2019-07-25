@@ -1,0 +1,18 @@
+From: Yves-Alexis Perez <corsac@debian.org>
+Date: Fri, 22 Feb 2019 17:23:09 +0100
+Subject: add /sbin/nologin to shells of ignored users
+
+---
+ data/users.conf | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/data/users.conf b/data/users.conf
+index e4948a6..5c01993 100644
+--- a/data/users.conf
++++ b/data/users.conf
+@@ -11,4 +11,4 @@
+ [UserList]
+ minimum-uid=500
+ hidden-users=nobody nobody4 noaccess
+-hidden-shells=/bin/false /usr/sbin/nologin
++hidden-shells=/bin/false /usr/sbin/nologin /sbin/nologin
