@@ -1,0 +1,40 @@
+Description: <short summary of the patch>
+ TODO: Put a short summary on the line above and replace this paragraph
+ with a longer explanation of this change. Complete the meta-information
+ with other relevant fields (see below for details). To make it easier, the
+ information below has been extracted from the changelog. Adjust it or drop
+ it.
+ .
+ lightdm (1.26.0-4) unstable; urgency=medium
+ .
+   * d/control: replace libpam-systemd dep by logind (closes: #922160)
+   * d/control: update standards version to 4.3.0
+   * d/control: fix capitalization of GObject
+   * d/patches: import patches in gbp pq
+Author: Yves-Alexis Perez <corsac@debian.org>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: 2019-08-16
+
+--- lightdm-1.26.0.orig/data/pam/lightdm
++++ lightdm-1.26.0/data/pam/lightdm
+@@ -3,6 +3,9 @@
+ # Block login if they are globally disabled
+ auth      requisite pam_nologin.so
+ 
++#Support nopasswdlogin
++auth      sufficient pam_succeed_if.so user ingroup nopasswdlogin
++
+ # Load environment from /etc/environment and ~/.pam_environment
+ session      required pam_env.so readenv=1
+ session      required pam_env.so readenv=1 envfile=/etc/default/locale
