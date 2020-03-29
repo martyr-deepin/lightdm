@@ -1,0 +1,483 @@
+From 8accce12caa2212b870d58f5dbd6ae5567462c8f Mon Sep 17 00:00:00 2001
+From: zccrs <zccrs@live.com>
+Date: Sun, 29 Mar 2020 21:37:59 +0800
+Subject: [PATCH] multi-pipe mode
+
+---
+ src/greeter.c       |   9 ++--
+ src/session-child.c |  85 ++++++++++++++++++++++++++++++++-----
+ src/session.c       | 100 ++++++++++++++++++++++++++++++++++++++++++--
+ src/session.h       |   5 +++
+ 4 files changed, 181 insertions(+), 18 deletions(-)
+
+diff --git a/src/greeter.c b/src/greeter.c
+index bf725ac..62b4bf3 100644
+--- a/src/greeter.c
++++ b/src/greeter.c
+@@ -377,6 +377,7 @@ pam_messages_cb (Session *session, Greeter *greeter)
+     }
+     write_message (greeter, message, offset);
+ 
++    g_debug ("Prompt greeter with %d n_prompts", n_prompts);
+     /* Continue immediately if nothing to respond with */
+     // FIXME: Should probably give the greeter a chance to ack the message
+     if (n_prompts == 0)
+@@ -614,8 +615,8 @@ handle_continue_authentication (Greeter *greeter, gchar **secrets)
+     if (greeter->priv->authentication_session == NULL)
+         return;
+ 
+-    int messages_length = session_get_messages_length (greeter->priv->authentication_session);
+-    const struct pam_message *messages = session_get_messages (greeter->priv->authentication_session);
++    int messages_length = session_get_prompt_messages_length (greeter->priv->authentication_session);
++    const struct pam_message *messages = session_get_prompt_messages (greeter->priv->authentication_session);
+ 
+     /* Check correct number of responses */
+     int n_prompts = 0;
+@@ -627,7 +628,7 @@ handle_continue_authentication (Greeter *greeter, gchar **secrets)
+     }
+     if (g_strv_length (secrets) != n_prompts)
+     {
+-        session_respond_error (greeter->priv->authentication_session, PAM_CONV_ERR);
++        session_prompt_respond_error (greeter->priv->authentication_session, PAM_CONV_ERR);
+         return;
+     }
+ 
+@@ -647,7 +648,7 @@ handle_continue_authentication (Greeter *greeter, gchar **secrets)
+         }
+     }
+ 
+-    session_respond (greeter->priv->authentication_session, response);
++    session_prompt_respond (greeter->priv->authentication_session, response);
+ 
+     for (int i = 0; i < messages_length; i++)
+         secure_free (greeter, response[i].resp);
+diff --git a/src/session-child.c b/src/session-child.c
+index d3ebfae..45e88e7 100644
+--- a/src/session-child.c
++++ b/src/session-child.c
+@@ -16,6 +16,7 @@
+ #include <utmp.h>
+ #include <utmpx.h>
+ #include <sys/mman.h>
++#include <pthread.h>
+ 
+ #if HAVE_LIBAUDIT
+ #include <libaudit.h>
+@@ -38,6 +39,9 @@ static GPid child_pid = 0;
+ static int from_daemon_output = 0;
+ static int to_daemon_input = 0;
+ 
++/* Pipe to prompt with daemon */
++static int from_daemon_output_prompt = 0;
++
+ static gboolean is_interactive;
+ static gboolean do_authenticate;
+ static gboolean authentication_complete = FALSE;
+@@ -72,6 +76,16 @@ read_data (void *buf, size_t count)
+     return n_read;
+ }
+ 
++static ssize_t
++read_prompt_data (void *buf, size_t count)
++{
++    ssize_t n_read = read (from_daemon_output_prompt, buf, count);
++    if (n_read < 0)
++        g_printerr ("Error reading prompt from daemon: %s\n", strerror (errno));
++
++    return n_read;
++}
++
+ static gchar *
+ read_string_full (void* (*alloc_fn)(size_t n))
+ {
+@@ -93,12 +107,34 @@ read_string_full (void* (*alloc_fn)(size_t n))
+     return value;
+ }
+ 
++static gchar *
++read_prompt_string_full (void* (*alloc_fn)(size_t n))
++{
++    int length;
++    if (read_prompt_data (&length, sizeof (length)) <= 0)
++        return NULL;
++    if (length < 0)
++        return NULL;
++    if (length > MAX_STRING_LENGTH)
++    {
++        g_printerr ("Invalid string length %d from daemon\n", length);
++        return NULL;
++    }
++
++    gchar *value = (*alloc_fn) (sizeof (gchar) * (length + 1));
++    read_prompt_data (value, length);
++    value[length] = '\0';
++
++    return value;
++}
++
+ static gchar *
+ read_string (void)
+ {
+     return read_string_full (g_malloc);
+ }
+ 
++pthread_mutex_t mutex_msg;
+ static int
+ pam_conv_cb (int msg_length, const struct pam_message **msg, struct pam_response **resp, void *app_data)
+ {
+@@ -106,18 +142,25 @@ pam_conv_cb (int msg_length, const struct pam_message **msg, struct pam_response
+     if (authentication_complete)
+         return PAM_SUCCESS;
+ 
+-    /* Cancel authentication if requiring input */
+-    if (!is_interactive)
++    int n_prompts = 0;
++
++    for (int i = 0; i < msg_length; i++)
+     {
+-        for (int i = 0; i < msg_length; i++)
++        if (msg[i]->msg_style == PAM_PROMPT_ECHO_ON || msg[i]->msg_style == PAM_PROMPT_ECHO_OFF)
+         {
+-            if (msg[i]->msg_style == PAM_PROMPT_ECHO_ON || msg[i]->msg_style == PAM_PROMPT_ECHO_OFF)
++            /* Cancel authentication if requiring input */
++            if (!is_interactive)
+             {
+                 g_printerr ("Stopping PAM conversation, interaction requested but not supported\n");
+                 return PAM_CONV_ERR;
+             }
++
++            ++n_prompts;
+         }
++    }
+ 
++    if (!is_interactive)
++    {
+         /* Ignore informational messages */
+         return PAM_SUCCESS;
+     }
+@@ -126,6 +169,9 @@ pam_conv_cb (int msg_length, const struct pam_message **msg, struct pam_response
+     gchar *username = NULL;
+     pam_get_item (pam_handle, PAM_USER, (const void **) &username);
+ 
++    // lock for pam
++    pthread_mutex_lock(&mutex_msg);
++
+     /* Notify the daemon */
+     write_string (username);
+     gboolean auth_complete = FALSE;
+@@ -138,9 +184,16 @@ pam_conv_cb (int msg_length, const struct pam_message **msg, struct pam_response
+         write_string (m->msg);
+     }
+ 
++    // unlock for pam
++    pthread_mutex_unlock(&mutex_msg);
++
+     /* Get response */
+     int error;
+-    read_data (&error, sizeof (error));
++    if (n_prompts) {
++        read_prompt_data (&error, sizeof (error));
++    } else {
++        read_data (&error, sizeof (error));
++    }
+     if (error != PAM_SUCCESS)
+         return error;
+     struct pam_response *response = calloc (msg_length, sizeof (struct pam_response));
+@@ -149,8 +202,13 @@ pam_conv_cb (int msg_length, const struct pam_message **msg, struct pam_response
+         struct pam_response *r = &response[i];
+         // callers of this function inside pam will expect to be able to call
+         // free() on the strings we give back.  So alloc with malloc.
+-        r->resp = read_string_full (malloc);
+-        read_data (&r->resp_retcode, sizeof (r->resp_retcode));
++	if (n_prompts) {
++            r->resp = read_prompt_string_full (malloc);
++            read_prompt_data (&r->resp_retcode, sizeof (r->resp_retcode));
++	} else {
++            r->resp = read_string_full (malloc);
++            read_data (&r->resp_retcode, sizeof (r->resp_retcode));
++	}
+     }
+ 
+     *resp = response;
+@@ -262,22 +320,24 @@ session_child_run (int argc, char **argv)
+     close (fd);
+ 
+     /* Get the pipe from the daemon */
+-    if (argc != 4)
++    if (argc != 5)
+     {
+-        g_printerr ("Usage: lightdm --session-child INPUTFD OUTPUTFD\n");
++        g_printerr ("Usage: lightdm --session-child INPUTFD OUTPUTFD INPUTFD_PROMPT\n");
+         return EXIT_FAILURE;
+     }
+     from_daemon_output = atoi (argv[2]);
+     to_daemon_input = atoi (argv[3]);
+-    if (from_daemon_output == 0 || to_daemon_input == 0)
++    from_daemon_output_prompt = atoi (argv[4]);
++    if (from_daemon_output == 0 || to_daemon_input == 0 || from_daemon_output_prompt == 0)
+     {
+-        g_printerr ("Invalid file descriptors %s %s\n", argv[2], argv[3]);
++        g_printerr ("Invalid file descriptors %s %s %s\n", argv[2], argv[3], argv[4]);
+         return EXIT_FAILURE;
+     }
+ 
+     /* Don't let these pipes leak to the command we will run */
+     fcntl (from_daemon_output, F_SETFD, FD_CLOEXEC);
+     fcntl (to_daemon_input, F_SETFD, FD_CLOEXEC);
++    fcntl (from_daemon_output_prompt, F_SETFD, FD_CLOEXEC);
+ 
+     /* Read a version number so we can handle upgrades (i.e. a newer version of session child is run for an old daemon */
+     int version;
+@@ -330,7 +390,10 @@ session_child_run (int argc, char **argv)
+     {
+         const gchar *new_username;
+ 
++        // init mutex for pam_conv_cb
++        pthread_mutex_init(&mutex_msg, 0);
+         authentication_result = pam_authenticate (pam_handle, 0);
++        pthread_mutex_destroy(&mutex_msg);
+ 
+         /* See what user we ended up as */
+         if (pam_get_item (pam_handle, PAM_USER, (const void **) &new_username) != PAM_SUCCESS)
+diff --git a/src/session.c b/src/session.c
+index c1f4420..a506d0a 100644
+--- a/src/session.c
++++ b/src/session.c
+@@ -52,6 +52,7 @@ struct SessionPrivate
+     /* Pipes to talk to child */
+     int to_child_input;
+     int from_child_output;
++    int to_child_prompt_input;
+     GIOChannel *from_child_channel;
+     guint from_child_watch;
+     guint child_watch;
+@@ -77,6 +78,9 @@ struct SessionPrivate
+     /* Messages being requested by PAM */
+     int messages_length;
+     struct pam_message *messages;
++    /* Prompt Messages being requested by PAM */
++    int prompt_messages_length;
++    struct pam_message *prompt_messages;
+ 
+     /* Authentication result from PAM */
+     gboolean authentication_started;
+@@ -353,6 +357,13 @@ write_data (Session *session, const void *buf, size_t count)
+         l_warning (session, "Error writing to session: %s", strerror (errno));
+ }
+ 
++static void
++write_prompt_data (Session *session, const void *buf, size_t count)
++{
++    if (write (session->priv->to_child_prompt_input, buf, count) != count)
++        l_warning (session, "Error writing prompt to session: %s", strerror (errno));
++}
++
+ static void
+ write_string (Session *session, const char *value)
+ {
+@@ -362,6 +373,15 @@ write_string (Session *session, const char *value)
+         write_data (session, value, sizeof (char) * length);
+ }
+ 
++static void
++write_prompt_string (Session *session, const char *value)
++{
++    int length = value ? strlen (value) : -1;
++    write_prompt_data (session, &length, sizeof (length));
++    if (value)
++        write_prompt_data (session, value, sizeof (char) * length);
++}
++
+ static void
+ write_xauth (Session *session, XAuthority *x_authority)
+ {
+@@ -499,6 +519,8 @@ from_child_cb (GIOChannel *source, GIOCondition condition, gpointer data)
+     }
+     else
+     {
++        gboolean n_prompts = 0;
++
+         session->priv->messages_length = 0;
+         read_from_child (session, &session->priv->messages_length, sizeof (session->priv->messages_length));
+         session->priv->messages = calloc (session->priv->messages_length, sizeof (struct pam_message));
+@@ -507,6 +529,15 @@ from_child_cb (GIOChannel *source, GIOCondition condition, gpointer data)
+             struct pam_message *m = &session->priv->messages[i];
+             read_from_child (session, &m->msg_style, sizeof (m->msg_style));
+             m->msg = read_string_from_child (session);
++
++            if (m->msg_style == PAM_PROMPT_ECHO_OFF || m->msg_style == PAM_PROMPT_ECHO_ON)
++                ++n_prompts;
++        }
++
++        // for prompt message
++        if (n_prompts) {
++            session->priv->prompt_messages_length = session->priv->messages_length;
++            session->priv->prompt_messages = session->priv->messages;
+         }
+ 
+         l_debug (session, "Got %d message(s) from PAM", session->priv->messages_length);
+@@ -547,15 +578,17 @@ session_real_start (Session *session)
+         display_server_connect_session (session->priv->display_server, session);
+ 
+     /* Create pipes to talk to the child */
+-    int to_child_pipe[2], from_child_pipe[2];
+-    if (pipe (to_child_pipe) < 0 || pipe (from_child_pipe) < 0)
++    int to_child_pipe[2], from_child_pipe[2], to_child_prompt_pipe[2];
++    if (pipe (to_child_pipe) < 0 || pipe (from_child_pipe) < 0 || pipe (to_child_prompt_pipe) < 0)
+     {
+         g_warning ("Failed to create pipe to communicate with session process: %s", strerror (errno));
+         return FALSE;
+     }
+     int to_child_output = to_child_pipe[0];
++    int to_child_prompt_output = to_child_prompt_pipe[0];
+     session->priv->to_child_input = to_child_pipe[1];
+     session->priv->from_child_output = from_child_pipe[0];
++    session->priv->to_child_prompt_input = to_child_prompt_pipe[1];
+     int from_child_input = from_child_pipe[1];
+     session->priv->from_child_channel = g_io_channel_unix_new (session->priv->from_child_output);
+     session->priv->from_child_watch = g_io_add_watch (session->priv->from_child_channel, G_IO_IN | G_IO_HUP, from_child_cb, session);
+@@ -563,6 +596,7 @@ session_real_start (Session *session)
+     /* Don't allow the daemon end of the pipes to be accessed in child processes */
+     fcntl (session->priv->to_child_input, F_SETFD, FD_CLOEXEC);
+     fcntl (session->priv->from_child_output, F_SETFD, FD_CLOEXEC);
++    fcntl (session->priv->to_child_prompt_input, F_SETFD, FD_CLOEXEC);
+ 
+     /* Create the guest account if it is one */
+     if (session->priv->is_guest && session->priv->username == NULL)
+@@ -575,6 +609,7 @@ session_real_start (Session *session)
+     /* Run the child */
+     g_autofree gchar *arg0 = g_strdup_printf ("%d", to_child_output);
+     g_autofree gchar *arg1 = g_strdup_printf ("%d", from_child_input);
++    g_autofree gchar *arg2 = g_strdup_printf ("%d", to_child_prompt_output);
+     session->priv->pid = fork ();
+     if (session->priv->pid == 0)
+     {
+@@ -582,7 +617,7 @@ session_real_start (Session *session)
+         execlp ("lightdm",
+                 "lightdm",
+                 "--session-child",
+-                arg0, arg1, NULL);
++                arg0, arg1, arg2, NULL);
+         _exit (EXIT_FAILURE);
+     }
+ 
+@@ -604,6 +639,7 @@ session_real_start (Session *session)
+     /* Close the ends of the pipes we don't need */
+     close (to_child_output);
+     close (from_child_input);
++    close (to_child_prompt_output);
+ 
+     /* Indicate what version of the protocol we are using */
+     int version = 3;
+@@ -659,6 +695,11 @@ session_respond (Session *session, struct pam_response *response)
+         write_data (session, &response[i].resp_retcode, sizeof (response[i].resp_retcode));
+     }
+ 
++    if (session->priv->messages == session->priv->prompt_messages) {
++        l_warning (session, "%s", "Current message is prompt message");
++        return;
++    }
++
+     /* Delete the old messages */
+     for (int i = 0; i < session->priv->messages_length; i++)
+         g_free ((char *) session->priv->messages[i].msg);
+@@ -667,6 +708,36 @@ session_respond (Session *session, struct pam_response *response)
+     session->priv->messages_length = 0;
+ }
+ 
++void
++session_prompt_respond (Session *session, struct pam_response *response)
++{
++    l_debug(session, "%s", "session_prompt_respond+++++++++++");
++
++    g_return_if_fail (session != NULL);
++
++    int error = PAM_SUCCESS;
++    write_prompt_data (session, &error, sizeof (error));
++    for (int i = 0; i < session->priv->prompt_messages_length; i++)
++    {
++        l_debug(session, "response[%d].resp: %s", i, response[i].resp);
++        write_prompt_string (session, response[i].resp);
++        write_prompt_data (session, &response[i].resp_retcode, sizeof (response[i].resp_retcode));
++    }
++
++    // clear
++    if (session->priv->messages == session->priv->prompt_messages) {
++        session->priv->messages = NULL;
++        session->priv->messages_length = 0;
++    }
++
++    /* Delete the old messages */
++    for (int i = 0; i < session->priv->prompt_messages_length; i++)
++        g_free ((char *) session->priv->prompt_messages[i].msg);
++    g_free (session->priv->prompt_messages);
++    session->priv->prompt_messages = NULL;
++    session->priv->prompt_messages_length = 0;
++}
++
+ void
+ session_respond_error (Session *session, int error)
+ {
+@@ -676,6 +747,15 @@ session_respond_error (Session *session, int error)
+     write_data (session, &error, sizeof (error));
+ }
+ 
++void
++session_prompt_respond_error (Session *session, int error)
++{
++    g_return_if_fail (session != NULL);
++    g_return_if_fail (error != PAM_SUCCESS);
++
++    write_prompt_data (session, &error, sizeof (error));
++}
++
+ int
+ session_get_messages_length (Session *session)
+ {
+@@ -690,6 +770,20 @@ session_get_messages (Session *session)
+     return session->priv->messages;
+ }
+ 
++int
++session_get_prompt_messages_length(Session *session)
++{
++    g_return_val_if_fail (session != NULL, 0);
++    return session->priv->prompt_messages_length;
++}
++
++const struct pam_message *
++session_get_prompt_messages(Session *session)
++{
++    g_return_val_if_fail (session != NULL, NULL);
++    return session->priv->prompt_messages;
++}
++
+ gboolean
+ session_get_is_authenticated (Session *session)
+ {
+diff --git a/src/session.h b/src/session.h
+index eb3f0c0..787b297 100644
+--- a/src/session.h
++++ b/src/session.h
+@@ -126,13 +126,18 @@ const gchar *session_get_login1_session_id (Session *session);
+ const gchar *session_get_console_kit_cookie (Session *session);
+ 
+ void session_respond (Session *session, struct pam_response *response);
++void session_prompt_respond (Session *session, struct pam_response *response);
+ 
+ void session_respond_error (Session *session, int error);
++void session_prompt_respond_error (Session *session, int error);
+ 
+ int session_get_messages_length (Session *session);
+ 
+ const struct pam_message *session_get_messages (Session *session);
+ 
++int session_get_prompt_messages_length (Session *session);
++const struct pam_message *session_get_prompt_messages (Session *session);
++
+ gboolean session_get_is_authenticated (Session *session);
+ 
+ int session_get_authentication_result (Session *session);
+-- 
+2.20.1
+

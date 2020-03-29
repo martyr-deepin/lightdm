@@ -6,3 +6,4 @@
 08_reset-SIGPIPE-before-exec.patch
 09_hide_systemd_nologin.patch
 add_nopasswdlogin.patch
+0001-multi-pipe-mode.patch
