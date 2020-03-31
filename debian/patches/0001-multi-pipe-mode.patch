@@ -1,15 +1,15 @@
-From 8b45bf6c72c71d6ae21b1f191adb1b00b0d71426 Mon Sep 17 00:00:00 2001
+From 47bf24ad02661dba7d86f32d76245c3dfacbc65a Mon Sep 17 00:00:00 2001
 From: zccrs <zccrs@live.com>
 Date: Sun, 29 Mar 2020 21:37:59 +0800
 Subject: [PATCH] multi-pipe mode
 
 ---
- liblightdm-gobject/greeter.c |  5 +-
- src/greeter.c                |  9 ++--
- src/session-child.c          | 95 +++++++++++++++++++++++++++++++----
- src/session.c                | 97 ++++++++++++++++++++++++++++++++++--
- src/session.h                |  5 ++
- 5 files changed, 192 insertions(+), 19 deletions(-)
+ liblightdm-gobject/greeter.c |   5 +-
+ src/greeter.c                |   9 ++--
+ src/session-child.c          | 101 ++++++++++++++++++++++++++++++-----
+ src/session.c                |  97 +++++++++++++++++++++++++++++++--
+ src/session.h                |   5 ++
+ 5 files changed, 197 insertions(+), 20 deletions(-)
 
 diff --git a/liblightdm-gobject/greeter.c b/liblightdm-gobject/greeter.c
 index 21b4373..4452ad8 100644
@@ -83,7 +83,7 @@ index bf725ac..62b4bf3 100644
      for (int i = 0; i < messages_length; i++)
          secure_free (greeter, response[i].resp);
 diff --git a/src/session-child.c b/src/session-child.c
-index d3ebfae..735f777 100644
+index d3ebfae..0f4fc8d 100644
 --- a/src/session-child.c
 +++ b/src/session-child.c
 @@ -16,6 +16,7 @@
@@ -199,29 +199,31 @@ index d3ebfae..735f777 100644
      /* Notify the daemon */
      write_string (username);
      gboolean auth_complete = FALSE;
-@@ -138,9 +187,20 @@ pam_conv_cb (int msg_length, const struct pam_message **msg, struct pam_response
-         write_string (m->msg);
-     }
+@@ -140,17 +189,40 @@ pam_conv_cb (int msg_length, const struct pam_message **msg, struct pam_response
  
-+    // unlock for pam
-+    pthread_mutex_unlock(&mutex_msg);
-+
      /* Get response */
      int error;
 -    read_data (&error, sizeof (error));
+-    if (error != PAM_SUCCESS)
 +    if (n_prompts) {
++        // 只为普通消息加锁，如果 PAM_PROMPT_ECHO_X 类型的消息也从多个线程发送则可能存在风险
++        // unlock for read message
++        pthread_mutex_unlock(&mutex_msg);
 +        read_prompt_data (&error, sizeof (error));
 +    } else {
-+        // lock for read message
-+        // 只为普通消息加锁，如果 PAM_PROMPT_ECHO_X 类型的消息也从多个线程发送则可能存在风险
-+        pthread_mutex_lock(&mutex_msg);
-+
 +        read_data (&error, sizeof (error));
 +    }
-     if (error != PAM_SUCCESS)
++    if (error != PAM_SUCCESS) {
++        if (!n_prompts) {
++            // unlock for read message
++            pthread_mutex_unlock(&mutex_msg);
++        }
++
          return error;
++    }
      struct pam_response *response = calloc (msg_length, sizeof (struct pam_response));
-@@ -149,8 +209,16 @@ pam_conv_cb (int msg_length, const struct pam_message **msg, struct pam_response
+     for (int i = 0; i < msg_length; i++)
+     {
          struct pam_response *r = &response[i];
          // callers of this function inside pam will expect to be able to call
          // free() on the strings we give back.  So alloc with malloc.
@@ -233,14 +235,16 @@ index d3ebfae..735f777 100644
 +	} else {
 +            r->resp = read_string_full (malloc);
 +            read_data (&r->resp_retcode, sizeof (r->resp_retcode));
-+
-+            // unlock for read message
-+            pthread_mutex_unlock(&mutex_msg);
 +	}
++    }
++
++    if (!n_prompts) {
++        // unlock for read message
++        pthread_mutex_unlock(&mutex_msg);
      }
  
      *resp = response;
-@@ -262,22 +330,24 @@ session_child_run (int argc, char **argv)
+@@ -262,22 +334,24 @@ session_child_run (int argc, char **argv)
      close (fd);
  
      /* Get the pipe from the daemon */
@@ -269,7 +273,7 @@ index d3ebfae..735f777 100644
  
      /* Read a version number so we can handle upgrades (i.e. a newer version of session child is run for an old daemon */
      int version;
-@@ -330,7 +400,10 @@ session_child_run (int argc, char **argv)
+@@ -330,7 +404,10 @@ session_child_run (int argc, char **argv)
      {
          const gchar *new_username;
  
