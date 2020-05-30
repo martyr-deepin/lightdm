@@ -7,3 +7,4 @@
 09_hide_systemd_nologin.patch
 add_nopasswdlogin.patch
 0001-multi-pipe-mode.patch
+10-dm-tool-lock-function-patch.patch
