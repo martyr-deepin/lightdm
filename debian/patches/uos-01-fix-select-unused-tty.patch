@@ -1,0 +1,80 @@
+Index: lightdm/src/vt.c
+===================================================================
+--- lightdm.orig/src/vt.c	2020-10-14 18:23:27.044560296 +0800
++++ lightdm/src/vt.c	2020-10-14 18:27:02.045437708 +0800
+@@ -19,10 +19,14 @@
+ #ifdef __linux__
+ #include <linux/vt.h>
+ #endif
++#include <dirent.h>
+ 
+ #include "vt.h"
+ #include "configuration.h"
+ 
++#define MAX_BUF_SIZE 512
++#define TTY_PREFIX "TTY=tty"
++
+ static GList *used_vts = NULL;
+ 
+ static gint
+@@ -112,8 +116,60 @@
+ }
+ 
+ static gboolean
++vt_is_used_by_dir(gint number)
++{
++    char *session_path = "/run/systemd/sessions";
++    FILE *session_dir = NULL;
++    struct dirent * dir_info = NULL;
++
++    session_dir = opendir(session_path);
++    if (!session_dir) {
++        g_warning("opendir session_path error: %s\n", strerror(errno));
++        return FALSE;
++    }
++
++    do {
++        dir_info = readdir(session_dir);
++        if (dir_info && dir_info->d_type == DT_REG) {
++            int tty_idx = -1;
++            char path[MAX_BUF_SIZE] = {0};
++            char line[MAX_BUF_SIZE] = {0};
++            FILE *session_fd = NULL;
++
++            snprintf(path, MAX_BUF_SIZE, "%s/%s", session_path, dir_info->d_name);
++            session_fd = fopen(path, "r");
++            if(!session_fd){
++                g_warning("open %s error: %s\n", path, strerror(errno));
++                continue;
++            }
++
++            while(fgets(line, MAX_BUF_SIZE, session_fd)) {
++                if (line[0] == '#')
++                    continue;
++                if(!strstr(line, TTY_PREFIX)) {
++                    continue;
++                }
++                tty_idx = atoi(line + strlen(TTY_PREFIX));
++                if (tty_idx && tty_idx == number) {
++                    fclose(session_fd);
++                    closedir(session_dir);
++                    return TRUE;
++                }
++            }
++            fclose(session_fd);
++        }
++    }while(dir_info);
++    closedir(session_dir);
++
++    return FALSE;
++}
++
++static gboolean
+ vt_is_used (gint number)
+ {
++    if (vt_is_used_by_dir(number))
++        return TRUE;
++
+     for (GList *link = used_vts; link; link = link->next)
+     {
+         int n = GPOINTER_TO_INT (link->data);

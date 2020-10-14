@@ -8,3 +8,4 @@
 add_nopasswdlogin.patch
 0001-multi-pipe-mode.patch
 10-dm-tool-lock-function-patch.patch
+uos-01-fix-select-unused-tty.patch
